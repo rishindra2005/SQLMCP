@@ -2,48 +2,71 @@ import logging
 import os
 from dotenv import load_dotenv
 from fastmcp import FastMCP
-from google import genai
-from google.genai import types
+import sqlalchemy
+from sqlalchemy.exc import SQLAlchemyError
 
-load_dotenv() # Load environment variables from .env file
-
-# Configure logging
+# --- Basic Setup ---
+load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
 mcp_server = FastMCP()
 
-@mcp_server.tool()
-def hello(name: str) -> str:
-    """
-    A simple tool that returns a greeting.
-    """
-    logging.info(f"Tool 'hello' called with name: {name}")
-    return f"Hello, {name}!"
+# --- Database Tools ---
 
-@mcp_server.tool()
-def generate_text(prompt: str) -> str:
-    """
-    Generates text using the Gemini API.
-    """
-    logging.info(f"Tool 'generate_text' called with prompt: {prompt}")
-    
-    # --- IMPORTANT ---
-    # The user needs to set the GEMINI_API_KEY environment variable for this tool to work.
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        logging.error("GEMINI_API_KEY environment variable not set.")
-        return "Error: GEMINI_API_KEY not set."
-
+def _get_engine():
+    """Creates and returns a SQLAlchemy engine."""
     try:
-        client = genai.Client(api_key=api_key)
-        contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
-        response = client.models.generate_content(model='gemini-2.5-flash', contents=contents)
-        logging.debug(f"Gemini API response: {response.text}")
-        return response.text
+        engine = sqlalchemy.create_engine("mysql+mysqlconnector://rishi@localhost:3306", pool_pre_ping=True)
+        return engine
     except Exception as e:
-        logging.error(f"An error occurred with the Gemini API: {e}")
+        logging.error(f"Error creating database engine: {e}")
+        return None
+
+@mcp_server.tool()
+def list_databases() -> list[str]:
+    """Lists all databases available on the MySQL server."""
+    logging.info("Executing tool: list_databases")
+    engine = _get_engine()
+    if not engine:
+        return ["Error: Could not create database engine."]
+    try:
+        with engine.connect() as connection:
+            result = connection.execute(sqlalchemy.text("SHOW DATABASES"))
+            databases = [row[0] for row in result]
+            return databases
+    except SQLAlchemyError as e:
+        logging.error(f"An error occurred while listing databases: {e}")
+        return [f"Error: {e}"]
+
+@mcp_server.tool()
+def create_database(db_name: str) -> str:
+    """Creates a new database with the given name. Example: create_database(db_name='my_new_db')"""
+    logging.info(f"Executing tool: create_database with db_name: {db_name}")
+    engine = _get_engine()
+    if not engine:
+        return "Error: Could not create database engine."
+    try:
+        with engine.connect() as connection:
+            connection.execution_options(autocommit=True).execute(sqlalchemy.text(f"CREATE DATABASE {db_name}"))
+        return f"Database '{db_name}' created successfully."
+    except SQLAlchemyError as e:
+        logging.error(f"An error occurred while creating database '{db_name}': {e}")
+        return f"Error: {e}"
+
+@mcp_server.tool()
+def delete_database(db_name: str) -> str:
+    """Deletes a database with the given name. Example: delete_database(db_name='my_old_db')"""
+    logging.info(f"Executing tool: delete_database with db_name: {db_name}")
+    engine = _get_engine()
+    if not engine:
+        return "Error: Could not create database engine."
+    try:
+        with engine.connect() as connection:
+            connection.execution_options(autocommit=True).execute(sqlalchemy.text(f"DROP DATABASE {db_name}"))
+        return f"Database '{db_name}' deleted successfully."
+    except SQLAlchemyError as e:
+        logging.error(f"An error occurred while deleting database '{db_name}': {e}")
         return f"Error: {e}"
 
 if __name__ == "__main__":
-    logging.info("Starting MCP server in HTTP mode...")
+    logging.info("Starting MCP tool server in HTTP mode...")
     mcp_server.run(transport="http")
