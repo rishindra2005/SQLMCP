@@ -31,6 +31,34 @@ def _generate_text(prompt: str) -> str:
         log.error(f"Error generating text: {e}")
         return f'{{"final_answer": "Error generating text: {e}"}}'
 
+def _parse_json_from_response(response_str: str) -> dict | None:
+    """Tries various strategies to parse a JSON object from an LLM response string."""
+    # Strategy 1: Direct parsing
+    try:
+        return json.loads(response_str)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: Clean up markdown `json` tags
+    if response_str.strip().startswith("```json"):
+        cleaned_str = response_str.strip()[7:-4].strip()
+        try:
+            return json.loads(cleaned_str)
+        except json.JSONDecodeError:
+            pass
+            
+    # Strategy 3: Extract JSON object from a larger string
+    try:
+        start = response_str.find('{')
+        end = response_str.rfind('}')
+        if start != -1 and end != -1 and end > start:
+            json_str = response_str[start:end+1]
+            return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
+
+    return None # Return None if all strategies fail
+
 async def main():
     """
     A ReAct-style agent client for the DBMS MCP server.
@@ -102,7 +130,7 @@ async def main():
                     continue
 
                 trajectory.append(f"User's objective: {user_prompt}") # Append to history
-                max_steps = 5 # To prevent infinite loops
+                max_steps = 15 # To prevent infinite loops
 
                 for i in range(max_steps):
                     print("---")
@@ -112,10 +140,19 @@ async def main():
                     llm_response_str = _generate_text(prompt_with_history)
                     
                     try:
-                        # Clean up and parse the LLM's JSON response
-                        if llm_response_str.strip().startswith("```json"):
-                            llm_response_str = llm_response_str.strip()[7:-4].strip()
-                        llm_response = json.loads(llm_response_str)
+                        llm_response = _parse_json_from_response(llm_response_str)
+
+                        if not llm_response:
+                            # If parsing fails completely, treat the raw string as a final answer.
+                            print(f"Warning: Could not parse model's response as JSON. Assuming it's a final answer.")
+                            thought = "(Could not parse thought, assuming raw response is the answer)"
+                            print(f"🤔 Thought: {thought}")
+                            trajectory.append(f"Thought: {thought}")
+                            
+                            final_answer = llm_response_str
+                            print(f"\n✅ Final Answer: {final_answer}")
+                            trajectory.append(f"Final Answer: {final_answer}")
+                            break # End of this query's loop
 
                         thought = llm_response.get("thought", "(No thought provided)")
                         print(f"🤔 Thought: {thought}")
@@ -151,17 +188,6 @@ async def main():
                             trajectory.append(f"Observation: Invalid tool '{tool_name}' selected.")
                             break
                             
-                    except json.JSONDecodeError as e:
-                        # If parsing fails, assume the entire response is the final answer, as the model may have forgotten to format it.
-                        print(f"Warning: Could not parse model's response as JSON. Assuming it's a final answer.")
-                        thought = "(Could not parse thought, assuming raw response is the answer)"
-                        print(f"🤔 Thought: {thought}")
-                        trajectory.append(f"Thought: {thought}")
-                        
-                        final_answer = llm_response_str
-                        print(f"\n✅ Final Answer: {final_answer}")
-                        trajectory.append(f"Final Answer: {final_answer}")
-                        break # End of this query's loop
                     except Exception as e:
                         print(f"An unexpected error occurred: {e}")
                         break
