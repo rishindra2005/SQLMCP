@@ -9,48 +9,39 @@ from google.genai import types
 
 # --- Basic Setup ---
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Reduce logging noise for a cleaner chat interface
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
 
 # --- Internal LLM Helper ---
-def _generate_text(system_prompt: str, history: list, user_prompt: str) -> str:
-    """Internal function to generate text using the Gemini API, including chat history."""
+def _generate_text(prompt: str) -> str:
+    """Internal function to generate text using the Gemini API."""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        logging.error("GEMINI_API_KEY not set.")
-        return '{"error": "GEMINI_API_KEY not set."}'
-    
+        log.error("GEMINI_API_KEY not set.")
+        return '{"final_answer": "Error: GEMINI_API_KEY not set."}'
     try:
         client = genai.Client(api_key=api_key)
-        
-        # Construct the full conversation history
-        contents = [
-            types.Content(role="user", parts=[types.Part.from_text(text=system_prompt)]),
-            types.Content(role="model", parts=[types.Part.from_text(text="Understood. I will act as a database management assistant and use the conversation history to resolve ambiguity.")])
-        ]
-        for user_msg, model_msg in history:
-            contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_msg)]))
-            contents.append(types.Content(role="model", parts=[types.Part.from_text(text=model_msg)]))
-        
-        # Add the current user prompt
-        contents.append(types.Content(role="user", parts=[types.Part.from_text(text=user_prompt)]))
-
+        # The ReAct prompt is sent as a single block, so we don't need complex history management here.
+        contents = [types.Content(role="user", parts=[types.Part.from_text(text=prompt)])]
         response = client.models.generate_content(model='gemini-2.5-flash', contents=contents)
         return response.text
     except Exception as e:
-        logging.error(f"Error generating text: {e}")
-        return f'{{"error": "Error generating text: {e}"}}'
+        log.error(f"Error generating text: {e}")
+        return f'{{"final_answer": "Error generating text: {e}"}}'
 
 async def main():
     """
-    A stateful, continuous chat-like agent client for the DBMS MCP server.
+    A ReAct-style agent client for the DBMS MCP server.
     """
     server_url = 'http://127.0.0.1:8000/mcp'
-    print("DBMS Agent Client (type 'exit' or 'quit' to close)")
+    print("DBMS ReAct Agent Client (type 'exit' or 'quit' to close)")
 
     try:
         client = Client(server_url)
         async with client:
-            logging.info("Fetching available tools from server...")
+            log.info("Fetching available tools from server...")
             tool_schemas_list = await client.list_tools()
             
             tool_schemas = {
@@ -61,64 +52,114 @@ async def main():
                 for tool in tool_schemas_list
             }
             
-            logging.info(f"Found {len(tool_schemas)} tools.")
+            log.info(f"Found {len(tool_schemas)} tools.")
             
             system_prompt = f"""
-            You are a database management assistant. Your goal is to help the user manage a MySQL database by calling the appropriate tools.
-            You have access to a conversation history. Use the history to resolve ambiguity in prompts. For example, if the user says "delete the database we just created", you should look at the history to find the name of that database.
-            Based on the user's prompt and the conversation history, choose the best tool to call from the following list.
-            You must respond with a single, valid JSON object containing the 'tool_name' and a dictionary of 'arguments'. Do not add any other text or formatting.
+            You are a ReAct-style database management assistant. Your goal is to achieve the user's objective by thinking, acting, and observing.
 
-            Available Tools:
+            **Workflow:**
+            1.  **Thought:** First, think step-by-step about the user's request and your plan. Your thought process should be detailed.
+            2.  **Action:** Based on your thought, decide if you need to use a tool.
+                - If you use a tool, the 'arguments' dictionary MUST contain all the required parameters for that tool as defined in its 'input_schema'.
+                - If you have the final answer for the user, provide that in the 'final_answer' field.
+            3.  **Observation:** After you act, you will be given the result of your action.
+            4.  Repeat this process of Thought, Action, Observation until you have the final answer for the user.
+
+            **Self-Correction:**
+            If an Action results in an error, you MUST re-evaluate your plan in the next Thought step. Use the error message to inform your next action. For example, if a database name is wrong, list the databases to find the correct name.
+
+            **Response Format:**
+            You MUST respond with a single valid JSON object containing EITHER:
+            - A 'thought' and an 'action' (for tool calls).
+            - A 'thought' and a 'final_answer'.
+
+            **Example (Tool Call with arguments):**
+            ```json
+            {{
+                "thought": "I have found the correct database name is 'nolan'. I will now delete it.",
+                "action": {{
+                    "tool_name": "delete_database",
+                    "arguments": {{
+                        "db_name": "nolan"
+                    }}
+                }}
+            }}
+            ```
+
+            **Available Tools:**
             {json.dumps(tool_schemas, indent=2)}
             """
             
-            history = []
-            
             while True:
-                prompt = input("> ")
-                if prompt.lower() in ["exit", "quit"]:
+                user_prompt = input("> ")
+                if user_prompt.lower() in ["exit", "quit"]:
                     break
-                if not prompt:
+                if not user_prompt:
                     continue
 
-                llm_prompt = f'User\'s request: "{prompt}"\n\nJSON response:'
-                llm_response_str = _generate_text(system_prompt, history, llm_prompt)
-                logging.info(f"LLM response: {llm_response_str}")
-                
-                try:
-                    if llm_response_str.strip().startswith("```json"):
-                        llm_response_str = llm_response_str.strip()[7:-4].strip()
+                trajectory = [f"User's objective: {user_prompt}"]
+                max_steps = 5 # To prevent infinite loops
 
-                    llm_response = json.loads(llm_response_str)
-                    tool_name = llm_response.get("tool_name")
-                    arguments = llm_response.get("arguments", {})
+                for i in range(max_steps):
+                    print("---")
+                    
+                    # 1. THINK and DECIDE on an ACTION
+                    prompt_with_history = f"{system_prompt}\n\n**Conversation Trajectory:**\n" + "\n".join(trajectory)
+                    llm_response_str = _generate_text(prompt_with_history)
+                    
+                    try:
+                        # Clean up and parse the LLM's JSON response
+                        if llm_response_str.strip().startswith("```json"):
+                            llm_response_str = llm_response_str.strip()[7:-4].strip()
+                        llm_response = json.loads(llm_response_str)
 
-                    if tool_name in tool_schemas:
-                        logging.info(f"Client is calling tool '{tool_name}' with arguments: {arguments}")
-                        result = await client.call_tool(tool_name, arguments)
-                        result_str = str(result.data)
-                        print(f"Result: {result_str}")
+                        thought = llm_response.get("thought", "(No thought provided)")
+                        print(f"🤔 Thought: {thought}")
+                        trajectory.append(f"Thought: {thought}")
+
+                        # Check if the agent has a final answer
+                        if "final_answer" in llm_response:
+                            final_answer = llm_response["final_answer"]
+                            print(f"\n✅ Final Answer: {final_answer}")
+                            trajectory.append(f"Final Answer: {final_answer}")
+                            break # End of this query's loop
+
+                        # 2. ACT (Call a tool)
+                        action = llm_response.get("action")
+                        if not action or "tool_name" not in action:
+                            print("Error: Model did not provide a valid action or final answer.")
+                            break
+
+                        tool_name = action["tool_name"]
+                        arguments = action.get("arguments", {})
                         
-                        # Add the successful interaction to the history
-                        history.append((f"User request: {prompt}", f"Agent action: Called tool '{tool_name}' with arguments {arguments}. Result: {result_str}"))
+                        if tool_name in tool_schemas:
+                            print(f"🎬 Action: Calling tool '{tool_name}' with arguments: {arguments}")
+                            trajectory.append(f"Action: Call tool `{tool_name}` with arguments `{arguments}`")
+                            
+                            result = await client.call_tool(tool_name, arguments)
+                            observation = str(result.data)
+                            
+                            print(f"🧐 Observation: {observation}")
+                            trajectory.append(f"Observation: {observation}")
+                        else:
+                            print(f"Error: Model chose an invalid tool: '{tool_name}'")
+                            trajectory.append(f"Observation: Invalid tool '{tool_name}' selected.")
+                            break
+                            
+                    except json.JSONDecodeError as e:
+                        print(f"Error: Could not parse the model's response. Raw response: {llm_response_str}")
+                        break
+                    except Exception as e:
+                        print(f"An unexpected error occurred: {e}")
+                        break
+                else:
+                    print("Warning: Agent reached maximum steps without finding a final answer.")
 
-                    else:
-                        print(f"Error: The model chose an invalid tool: {tool_name}")
-                        history.append((f"User request: {prompt}", f"Agent action: The model tried to call an invalid tool: {tool_name}"))
-
-                except (json.JSONDecodeError, KeyError) as e:
-                    logging.error(f"Error parsing LLM response: {e} - Response was: {llm_response_str}")
-                    print(f"Could not determine which action to take. The model returned an invalid format.")
-                    history.append((f"User request: {prompt}", f"Agent action: Error parsing LLM response."))
-                except Exception as e:
-                    logging.error(f"An unexpected error occurred: {e}")
-                    print(f"An unexpected error occurred: {e}")
-                    history.append((f"User request: {prompt}", f"Agent action: An unexpected error occurred: {e}"))
 
     except Exception as e:
-        logging.error(f"Failed to connect to the server at {server_url}: {e}")
-        print(f"Error: Could not connect to the MCP server. Is it running?")
+        log.error(f"Failed to connect to the server at {server_url}: {e}")
+        print(f"\nError: Could not connect to the MCP server. Is it running?")
 
 if __name__ == "__main__":
     asyncio.run(main())
