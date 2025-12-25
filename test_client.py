@@ -73,6 +73,8 @@ async def main():
             - A 'thought' and an 'action' (for tool calls).
             - A 'thought' and a 'final_answer'.
 
+            **VERY IMPORTANT**: Your entire response MUST be ONLY the JSON object. Do not add any conversational text or formatting before or after the JSON. Any explanation, plan, or final message to the user must be placed inside the `final_answer` field.
+
             **Example (Tool Call with arguments):**
             ```json
             {{
@@ -90,6 +92,8 @@ async def main():
             {json.dumps(tool_schemas, indent=2)}
             """
             
+            trajectory = [] # Initialize history here
+            
             while True:
                 user_prompt = input("> ")
                 if user_prompt.lower() in ["exit", "quit"]:
@@ -97,7 +101,7 @@ async def main():
                 if not user_prompt:
                     continue
 
-                trajectory = [f"User's objective: {user_prompt}"]
+                trajectory.append(f"User's objective: {user_prompt}") # Append to history
                 max_steps = 5 # To prevent infinite loops
 
                 for i in range(max_steps):
@@ -148,8 +152,16 @@ async def main():
                             break
                             
                     except json.JSONDecodeError as e:
-                        print(f"Error: Could not parse the model's response. Raw response: {llm_response_str}")
-                        break
+                        # If parsing fails, assume the entire response is the final answer, as the model may have forgotten to format it.
+                        print(f"Warning: Could not parse model's response as JSON. Assuming it's a final answer.")
+                        thought = "(Could not parse thought, assuming raw response is the answer)"
+                        print(f"🤔 Thought: {thought}")
+                        trajectory.append(f"Thought: {thought}")
+                        
+                        final_answer = llm_response_str
+                        print(f"\n✅ Final Answer: {final_answer}")
+                        trajectory.append(f"Final Answer: {final_answer}")
+                        break # End of this query's loop
                     except Exception as e:
                         print(f"An unexpected error occurred: {e}")
                         break
