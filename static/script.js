@@ -75,24 +75,50 @@ document.addEventListener('DOMContentLoaded', () => {
                 body: JSON.stringify({ prompt: userPrompt }),
             });
             
-            // Remove the loading message
             loadingMessage.remove();
 
             if (!response.ok) {
                 throw new Error(`HTTP error! status: ${response.status}`);
             }
 
-            const steps = await response.json();
-            steps.forEach(step => {
-                addMessage(step.type, step.content);
-            });
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) {
+                    break;
+                }
+                
+                buffer += decoder.decode(value, { stream: true });
+                
+                let boundary = buffer.indexOf('\n\n');
+                while (boundary !== -1) {
+                    const message = buffer.substring(0, boundary);
+                    buffer = buffer.substring(boundary + 2);
+                    
+                    if (message.startsWith('data: ')) {
+                        const jsonData = message.substring(6);
+                        if (jsonData) {
+                            try {
+                                const step = JSON.parse(jsonData);
+                                addMessage(step.type, step.content);
+                            } catch (e) {
+                                console.error("Error parsing JSON from stream:", e, jsonData);
+                            }
+                        }
+                    }
+                    boundary = buffer.indexOf('\n\n');
+                }
+            }
             
             // Final status update
             await updateConnectionStatus();
 
         } catch (error) {
             console.error('Error during chat:', error);
-            loadingMessage.remove();
+            if (loadingMessage) loadingMessage.remove();
             addMessage('error', 'An error occurred while communicating with the agent.');
         }
     });

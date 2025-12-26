@@ -3,7 +3,7 @@ import asyncio
 import os
 import json
 from dotenv import load_dotenv
-from flask import Flask, render_template, request, Response
+from flask import Flask, render_template, request, Response, stream_with_context
 from fastmcp import Client
 from google import genai
 from google.genai import types
@@ -37,16 +37,24 @@ def _generate_text(prompt: str) -> str:
 
 def _parse_json_from_response(response_str: str) -> dict | None:
     """Tries various strategies to parse a JSON object from an LLM response string."""
+    # Strategy 1: Direct parsing
     try:
         return json.loads(response_str)
     except json.JSONDecodeError:
         pass
-    if response_str.strip().startswith("```json"):
-        cleaned_str = response_str.strip()[7:-4].strip()
-        try:
-            return json.loads(cleaned_str)
-        except json.JSONDecodeError:
-            pass
+
+    # Strategy 2: Find JSON within markdown code blocks
+    if '```json' in response_str:
+        start_pos = response_str.find('```json')
+        end_pos = response_str.find('```', start_pos + 7)
+        if start_pos != -1 and end_pos != -1:
+            json_text = response_str[start_pos + 7:end_pos].strip()
+            try:
+                return json.loads(json_text)
+            except json.JSONDecodeError:
+                pass
+
+    # Strategy 3: Find the first and last brace and parse as JSON
     try:
         start = response_str.find('{')
         end = response_str.rfind('}')
@@ -55,15 +63,15 @@ def _parse_json_from_response(response_str: str) -> dict | None:
             return json.loads(json_str)
     except json.JSONDecodeError:
         pass
+
     return None
 
 # --- Agent Core Logic ---
 async def run_agent_steps(user_prompt: str):
     """
-    Connects to the MCP, runs the ReAct agent logic, and returns a list of all steps.
+    Connects to the MCP, runs the ReAct agent logic, and yields each step as it happens.
     """
     global trajectory
-    steps = []
 
     if user_prompt:
         trajectory.append(f"User's objective: {user_prompt}")
@@ -109,58 +117,57 @@ async def run_agent_steps(user_prompt: str):
                 llm_response = _parse_json_from_response(llm_response_str)
 
                 if not llm_response:
-                    steps.append({
+                    step = {
                         "type": "final_answer", 
                         "content": f"Warning: Model provided a non-JSON response. Treating it as a final answer.\n\n---\n\n{llm_response_str}"
-                    })
+                    }
+                    yield step
                     trajectory.append(f"Final Answer: {llm_response_str}")
                     break
 
                 thought = llm_response.get("thought", "(No thought provided)")
-                steps.append({"type": "thought", "content": thought})
+                yield {"type": "thought", "content": thought}
                 trajectory.append(f"Thought: {thought}")
 
                 if "final_answer" in llm_response:
                     final_answer = llm_response["final_answer"]
-                    steps.append({"type": "final_answer", "content": final_answer})
+                    yield {"type": "final_answer", "content": final_answer}
                     trajectory.append(f"Final Answer: {final_answer}")
                     break
 
                 action = llm_response.get("action")
                 if not action or "tool_name" not in action:
-                    steps.append({"type": "error", "content": "Model did not provide a valid action or final answer."})
+                    yield {"type": "error", "content": "Model did not provide a valid action or final answer."}
                     break
                 
                 tool_name = action["tool_name"]
                 arguments = action.get("arguments", {})
                 
                 if tool_name in tool_schemas:
-                    steps.append({"type": "action", "content": f"Calling tool `{tool_name}` with arguments: `{arguments}`"})
+                    yield {"type": "action", "content": f"Calling tool `{tool_name}` with arguments: `{arguments}`"}
                     trajectory.append(f"Action: Call tool `{tool_name}` with arguments `{arguments}`")
 
                     try:
                         result = await mcp_client.call_tool(tool_name, arguments)
                         observation = str(result.data)
-                        steps.append({"type": "observation", "content": observation})
+                        yield {"type": "observation", "content": observation}
                         trajectory.append(f"Observation: {observation}")
                     except Exception as e:
                         error_msg = f"Error calling tool '{tool_name}': {e}"
                         logging.error(error_msg)
-                        steps.append({"type": "error", "content": error_msg})
+                        yield {"type": "error", "content": error_msg}
                         trajectory.append(f"Observation: {error_msg}")
                 else:
                     error_msg = f"Model chose an invalid tool: '{tool_name}'"
-                    steps.append({"type": "error", "content": error_msg})
+                    yield {"type": "error", "content": error_msg}
                     trajectory.append(f"Observation: {error_msg}")
                     break
             else:
-                steps.append({"type": "error", "content": "Agent reached maximum steps without finding a final answer."})
+                yield {"type": "error", "content": "Agent reached maximum steps without finding a final answer."}
     except Exception as e:
         error_msg = f"Failed to run agent step: {e}"
         logging.error(error_msg)
-        steps.append({"type": "error", "content": error_msg})
-    
-    return steps
+        yield {"type": "error", "content": error_msg}
 
 # --- Flask Routes ---
 @app.route('/')
@@ -168,13 +175,26 @@ def index():
     return render_template('index.html')
 
 @app.route('/chat', methods=['POST'])
-async def chat():
+def chat():
     user_prompt = request.json.get('prompt')
     if not user_prompt:
         return Response(status=400)
     
-    steps = await run_agent_steps(user_prompt)
-    return Response(json.dumps(steps), mimetype='application/json')
+    agent_stream = run_agent_steps(user_prompt)
+
+    def sync_generator():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            while True:
+                step = loop.run_until_complete(agent_stream.__anext__())
+                yield f"data: {json.dumps(step)}\n\n"
+        except StopAsyncIteration:
+            pass
+        finally:
+            loop.close()
+
+    return Response(stream_with_context(sync_generator()), mimetype='text/event-stream')
 
 @app.route('/status', methods=['GET'])
 async def status():
