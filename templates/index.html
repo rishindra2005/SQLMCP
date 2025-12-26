@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DBMS Agent</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h2>DBMS Agent</h2>
+            <div id="connection-status">Loading status...</div>
+            <button id="reset-button" title="Reset Conversation"><i class="fas fa-sync-alt"></i></button>
+        </div>
+        <div class="chat-log" id="chat-log">
+            <!-- Messages will be appended here -->
+        </div>
+        <div class="chat-input-area">
+            <form id="chat-form">
+                <textarea id="user-input" placeholder="Ask the DBMS agent..." rows="1"></textarea>
+                <button type="submit"><i class="fas fa-paper-plane"></i></button>
+            </form>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

@@ -44,7 +44,7 @@ Before you begin, ensure you have the following installed on your system:
     A `requirements.txt` file is not yet available. Install the required packages manually:
     ```bash
     pip install "fastmcp @ git+https://github.com/google/generative-ai-docs@main#subdirectory=examples/gemini/python/tools/fastmcp"
-    pip install sqlalchemy mysql-connector-python python-dotenv pandas eralchemy2
+    pip install sqlalchemy mysql-connector-python python-dotenv pandas "Flask[async]"
     ```
 
 4.  **Configure Environment Variables:**
@@ -60,21 +60,34 @@ Before you begin, ensure you have the following installed on your system:
 
 ## Usage
 
-The application consists of two main components: the MCP server that exposes the tools, and the interactive client that you use to talk to the agent.
+The application can be run in two modes: as a command-line client or as a more user-friendly web interface.
 
-1.  **Start the MCP Server:**
-    Open a terminal and run the following command from the project root:
-    ```bash
-    python main.py
-    ```
-    The server will start and be ready to accept tool calls from the agent.
+### 1. Start the MCP Server (Required for both clients)
+First, open a terminal and run the MCP server, which exposes the tools to the agent:
+```bash
+python main.py
+```
+The server will start and be ready to accept tool calls.
 
-2.  **Run the Interactive Client:**
-    Open a *second* terminal and run the client:
+### 2. Run the Web Interface (Recommended)
+
+1.  **Start the Web App:**
+    In a *second* terminal, run the Flask application:
     ```bash
-    python test_client.py
+    python app.py
     ```
-    You will be prompted with `>`. You can now type commands in natural language, like "list all databases" or "show me the schema for the users table".
+2.  **Access the UI:**
+    Open your web browser and navigate to `http://127.0.0.1:5001`. You can now interact with the agent through the chat interface.
+
+### 3. Run the Interactive Command-Line Client
+
+As an alternative to the web interface, you can use the original command-line client.
+
+In a *second* terminal, run the client:
+```bash
+python test_client.py
+```
+You will be prompted with `>`. You can now type commands in natural language.
 
 ## Running Tests
 
