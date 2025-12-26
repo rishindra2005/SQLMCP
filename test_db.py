@@ -395,18 +395,17 @@ def test_performance_admin_tools(db_engine, test_db_name):
 def test_visualization_tools(db_engine):
     print("\n--- Testing Visualization Tools ---")
     output_dir = "schemaspy_output"
+
+    # Ensure we start with a clean directory
+    if os.path.exists(output_dir):
+        print(f"  → Removing existing output directory: {output_dir}")
+        shutil.rmtree(output_dir)
     
     # This test will open a browser window.
     result = visualize_er_diagram(db_engine, output_dir=output_dir)
     assert result['status'] == 'success', f"visualize_er_diagram failed: {result.get('detail')}"
     
-    print(f"  → Giving browser time to open the report from '{output_dir}'...")
-    time.sleep(5) # Give browser time to open
-
-    # Cleanup generated directory
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-        
+    print(f"  → Report generated in '{output_dir}'. It will not be deleted automatically.")
     print("✓ Visualization Tools Passed (a browser window may have opened)")
 
 def run_test_suite():
