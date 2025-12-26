@@ -1,5 +1,8 @@
 import logging
 import os
+import shutil
+import subprocess
+import webbrowser
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 import sqlalchemy
@@ -181,6 +184,31 @@ def delete_database(db_name: str, confirm: bool = False) -> dict:
 
 # --- Category 1: Discovery & Metadata ---
 
+def _internal_list_tables(engine) -> list[str]:
+    with engine.connect() as connection:
+        result = connection.execute(sqlalchemy.text("SHOW TABLES"))
+        return [row[0] for row in result]
+
+def _internal_get_table_schema(engine, table_name: str) -> list[dict]:
+    query = f"""
+        SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA 
+        FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = '{engine.url.database}' AND TABLE_NAME = '{table_name}'
+    """
+    with engine.connect() as connection:
+        result = connection.execute(sqlalchemy.text(query))
+        return [row._asdict() for row in result]
+
+def _internal_get_table_relations(engine) -> list[dict]:
+    query = f"""
+        SELECT kcu.TABLE_NAME, kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME 
+        FROM information_schema.key_column_usage AS kcu 
+        WHERE kcu.TABLE_SCHEMA = '{engine.url.database}' AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+    """
+    with engine.connect() as connection:
+        result = connection.execute(sqlalchemy.text(query))
+        return [row._asdict() for row in result]
+
 @mcp_server.tool()
 def list_tables() -> dict:
     """
@@ -202,9 +230,7 @@ def list_tables() -> dict:
         return {"error": f"Could not connect to database '{_current_db}'."}
     
     try:
-        with engine.connect() as connection:
-            result = connection.execute(sqlalchemy.text("SHOW TABLES"))
-            tables = [row[0] for row in result]
+        tables = _internal_list_tables(engine)
         return {"tables": tables, "count": len(tables), "database": _current_db}
     except SQLAlchemyError as e:
         logging.error(f"Error listing tables: {e}")
@@ -234,14 +260,7 @@ def get_table_schema(table_name: str) -> dict:
         return {"error": f"Could not connect to database '{_current_db}'."}
     
     try:
-        query = f"""
-            SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, COLUMN_DEFAULT, EXTRA 
-            FROM INFORMATION_SCHEMA.COLUMNS 
-            WHERE TABLE_SCHEMA = '{_current_db}' AND TABLE_NAME = '{table_name}'
-        """
-        with engine.connect() as connection:
-            result = connection.execute(sqlalchemy.text(query))
-            schema = [row._asdict() for row in result]
+        schema = _internal_get_table_schema(engine, table_name)
         return {"table": table_name, "schema": schema, "column_count": len(schema)}
     except SQLAlchemyError as e:
         logging.error(f"Error getting table schema: {e}")
@@ -268,17 +287,59 @@ def get_table_relations() -> dict:
         return {"error": f"Could not connect to database '{_current_db}'."}
     
     try:
-        query = f"""
-            SELECT kcu.TABLE_NAME, kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME 
-            FROM information_schema.key_column_usage AS kcu 
-            WHERE kcu.TABLE_SCHEMA = '{_current_db}' AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
-        """
-        with engine.connect() as connection:
-            result = connection.execute(sqlalchemy.text(query))
-            relations = [row._asdict() for row in result]
+        relations = _internal_get_table_relations(engine)
         return {"relations": relations, "count": len(relations), "database": _current_db}
     except SQLAlchemyError as e:
         logging.error(f"Error getting table relations: {e}")
+        return {"error": str(e)}
+
+@mcp_server.tool()
+def get_full_schema() -> dict:
+    """
+    Retrieves a complete schema overview for the currently connected database.
+    This includes a list of all tables, the schema for each table, and all foreign key relationships.
+    This is a high-level tool that combines list_tables, get_table_schema, and get_table_relations.
+    
+    **REQUIRES**: Active database connection (use connect_database first)
+    
+    Returns:
+        A dictionary containing the full database schema or an error message.
+    """
+    logging.info("Executing tool: get_full_schema")
+    if not _current_db:
+        return {"error": "No database connected. Use connect_database() first."}
+
+    engine = _get_db_engine()
+    if not engine:
+        return {"error": f"Could not connect to database '{_current_db}'."}
+
+    try:
+        table_names = _internal_list_tables(engine)
+        
+        full_schema = {
+            "database": _current_db,
+            "tables": {},
+            "relations": [],
+            "summary": {}
+        }
+
+        for table_name in table_names:
+            schema_info = _internal_get_table_schema(engine, table_name)
+            full_schema["tables"][table_name] = {
+                "schema": schema_info,
+                "column_count": len(schema_info)
+            }
+
+        full_schema["relations"] = _internal_get_table_relations(engine)
+        
+        full_schema["summary"] = {
+            "table_count": len(table_names),
+            "relation_count": len(full_schema["relations"])
+        }
+        
+        return full_schema
+    except SQLAlchemyError as e:
+        logging.error(f"Error getting full schema: {e}")
         return {"error": str(e)}
 
 @mcp_server.tool()
@@ -1004,6 +1065,94 @@ def list_active_processes() -> dict:
     except SQLAlchemyError as e:
         logging.error(f"Error listing processes: {e}")
         return {"error": str(e)}
+
+# --- Category 6: Visualization ---
+@mcp_server.tool()
+def visualize_schema(output_dir: str = "schemaspy_output") -> dict:
+    """
+    Generates a detailed schema analysis and ER diagram for the currently connected database using SchemaSpy.
+    
+    **REQUIRES**: 
+    - Active database connection (use connect_database first).
+    - Java and Graphviz must be installed and in the system's PATH.
+    - `schemaspy-app.jar` and `mysql-connector-java.jar` must be in the project root directory.
+
+    Args:
+        output_dir: The directory to save the generated report to. Defaults to 'schemaspy_output'.
+
+    Returns:
+        Dictionary with status and a detail message, including the path to the local report.
+    """
+    logging.info(f"Executing tool: visualize_schema, outputting to {output_dir}")
+    
+    if not _current_db:
+        return {"error": "No database connected. Use connect_database() first."}
+
+    engine = _get_db_engine()
+    if not engine:
+        return {"error": f"Could not create engine for database '{_current_db}'."}
+        
+    db_url = engine.url
+
+    # --- Pre-run checks and setup ---
+    schemaspy_jar = "schemaspy-app.jar"
+    jdbc_jar = "mysql-connector-java.jar"
+    if not os.path.exists(schemaspy_jar) or not os.path.exists(jdbc_jar):
+        return {
+            "status": "error",
+            "detail": f"Missing required JAR files. Ensure '{schemaspy_jar}' and '{jdbc_jar}' are in the root directory."
+        }
+
+    # Per user request, remove old output directory before running
+    if os.path.exists(output_dir):
+        logging.info(f"Removing existing output directory: {output_dir}")
+        shutil.rmtree(output_dir)
+
+    # --- Construct and run the command ---
+    command = [
+        "java", "-jar", schemaspy_jar,
+        "-t", "mysql",
+        "-db", db_url.database,
+        "-s", db_url.database,
+        "-host", str(db_url.host or 'localhost'),
+        "-port", str(db_url.port or 3306),
+        "-u", str(db_url.username),
+        "-o", output_dir,
+        "-dp", jdbc_jar
+    ]
+    if db_url.password:
+        command.extend(["-p", str(db_url.password)])
+
+    try:
+        logging.info(f"Running SchemaSpy command: {' '.join(command)}")
+        result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=120)
+        logging.info(f"SchemaSpy STDOUT: {result.stdout}")
+        logging.warning(f"SchemaSpy STDERR: {result.stderr}")
+
+        # User wants the relationships page specifically
+        report_file = os.path.join(output_dir, "relationships.html")
+        
+        if os.path.exists(report_file):
+            webbrowser.open('file://' + os.path.realpath(report_file))
+            return {
+                "status": "success",
+                "detail": f"SchemaSpy report generated in '{output_dir}'. Opening the relationships page in browser."
+            }
+        else:
+            return {"status": "error", "detail": f"SchemaSpy ran, but the relationships page '{report_file}' was not found."}
+            
+    except FileNotFoundError:
+        return {"status": "error", "detail": "Java is not installed or not in the system's PATH."}
+    except subprocess.TimeoutExpired:
+        return {"status": "error", "detail": "SchemaSpy execution timed out after 2 minutes."}
+    except subprocess.CalledProcessError as e:
+        error_message = f"SchemaSpy execution failed with exit code {e.returncode}.\n"
+        error_message += f"Ensure Java and Graphviz are installed and that database credentials are correct.\n"
+        error_message += f"STDOUT: {e.stdout}\n"
+        error_message += f"STDERR: {e.stderr}\n"
+        return {"status": "error", "detail": error_message}
+    except Exception as e:
+        return {"status": "error", "detail": f"An unexpected error occurred: {e}"}
 
 if __name__ == "__main__":
     logging.info("Starting MCP tool server in HTTP mode...")
