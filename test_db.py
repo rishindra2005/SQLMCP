@@ -1,6 +1,11 @@
 import sqlalchemy
 from sqlalchemy.exc import SQLAlchemyError
 import pandas as pd
+import os
+import webbrowser
+import time
+import shutil
+import subprocess
 
 # --- Engine Creation ---
 def get_server_engine():
@@ -216,6 +221,63 @@ def list_active_processes(engine) -> list[dict]:
     with engine.connect() as c: 
         return [row._asdict() for row in c.execute(sqlalchemy.text("SHOW FULL PROCESSLIST"))]
 
+# Category 6: Visualization
+def visualize_er_diagram(engine, output_dir="schemaspy_output"):
+    """
+    Generates a detailed schema analysis and ER diagram using SchemaSpy.
+    Requires Java, Graphviz, and the downloaded SchemaSpy/JDBC jars to be present.
+    """
+    db_url = engine.url
+    
+    # Ensure SchemaSpy and driver exist
+    schemaspy_jar = "schemaspy-app.jar"
+    jdbc_jar = "mysql-connector-java.jar"
+    if not os.path.exists(schemaspy_jar) or not os.path.exists(jdbc_jar):
+        return {
+            "status": "error",
+            "detail": f"Missing required JAR files. Ensure '{schemaspy_jar}' and '{jdbc_jar}' are in the root directory."
+        }
+
+    # Construct the command
+    command = [
+        "java", "-jar", schemaspy_jar,
+        "-t", "mysql",
+        "-db", db_url.database,
+        "-s", db_url.database,
+        "-host", str(db_url.host),
+        "-port", str(db_url.port or 3306),
+        "-u", str(db_url.username),
+        "-o", output_dir,
+        "-dp", jdbc_jar
+    ]
+    if db_url.password:
+        command.extend(["-p", str(db_url.password)])
+
+    try:
+        print(f"  → Running SchemaSpy command: {' '.join(command)}")
+        subprocess.run(command, check=True, capture_output=True, text=True)
+        
+        index_file = os.path.join(output_dir, "index.html")
+        if os.path.exists(index_file):
+            webbrowser.open('file://' + os.path.realpath(index_file))
+            return {
+                "status": "success",
+                "detail": f"SchemaSpy report generated in '{output_dir}' and opened in browser."
+            }
+        else:
+            return {"status": "error", "detail": "SchemaSpy ran but the output index.html was not found."}
+            
+    except FileNotFoundError:
+        return {"status": "error", "detail": "Java is not installed or not in the system's PATH."}
+    except subprocess.CalledProcessError as e:
+        error_message = f"SchemaSpy execution failed with exit code {e.returncode}.\n"
+        error_message += f"Ensure Java and Graphviz are installed and that database credentials are correct.\n"
+        error_message += f"STDOUT: {e.stdout}\n"
+        error_message += f"STDERR: {e.stderr}\n"
+        return {"status": "error", "detail": error_message}
+    except Exception as e:
+        return {"status": "error", "detail": f"An unexpected error occurred: {e}"}
+
 # --- Test Functions ---
 
 def test_discovery_tools(db_engine, test_db_name):
@@ -330,6 +392,23 @@ def test_performance_admin_tools(db_engine, test_db_name):
     assert len(list_active_processes(db_engine)) > 0, "list_active_processes failed"
     print("✓ Performance & Admin Tools Passed")
 
+def test_visualization_tools(db_engine):
+    print("\n--- Testing Visualization Tools ---")
+    output_dir = "schemaspy_output"
+    
+    # This test will open a browser window.
+    result = visualize_er_diagram(db_engine, output_dir=output_dir)
+    assert result['status'] == 'success', f"visualize_er_diagram failed: {result.get('detail')}"
+    
+    print(f"  → Giving browser time to open the report from '{output_dir}'...")
+    time.sleep(5) # Give browser time to open
+
+    # Cleanup generated directory
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
+        
+    print("✓ Visualization Tools Passed (a browser window may have opened)")
+
 def run_test_suite():
     test_db_name = "test_mcp_db_12345"
     server_engine = get_server_engine()
@@ -360,6 +439,7 @@ def run_test_suite():
         test_schema_engineering_tools(db_engine)
         test_transaction_integrity_tools(db_engine, test_db_name)
         test_performance_admin_tools(db_engine, test_db_name)
+        test_visualization_tools(db_engine)
 
         print("\n--- All 20 Tools Tested Successfully ---")
 
